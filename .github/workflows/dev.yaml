@@ -1,0 +1,72 @@
+name: CI/CD Pipeline - Sync to Production
+
+on:
+  push:
+    branches:
+      - main  # Trigger when changes are pushed or merged into main branch in the dev repo
+
+jobs:
+  sync_to_production:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Detect changed files with DEV
+      id: changes
+      run: |
+        echo "Changed dev files:"
+        
+        # Fetch history to ensure HEAD^ works
+        git fetch --prune --unshallow || true
+        
+        # Check if there's at least one previous commit
+        if git rev-parse HEAD^ >/dev/null 2>&1; then
+          git diff --name-only HEAD^ HEAD | grep 'dev' | tee changed_files.txt
+        else
+          echo "No previous commit, skipping diff check." > changed_files.txt
+        fi
+        
+        # Extract unique project directories from the changed files
+        awk -F'/' '{print $1}' changed_files.txt | sort -u | tee changed_projects.txt
+        
+        # Export each changed project as an environment variable
+        while read project; do
+          echo "${project}_changed=true" >> $GITHUB_ENV
+        done < changed_projects.txt
+
+
+    - name: Sync changed projects to production repository
+      env:
+        PROD_REPO: "https://github.com/nikolaslyonsLW/LW-Prod-Lambdas.git"
+        GITHUB_TOKEN: ${{ secrets.TOKEN_PROD }}
+      run: |
+        # Clone the production repository
+        git clone https://x-access-token:${{ secrets.TOKEN_PROD }}@github.com/nikolaslyonsLW/LW-Prod-Lambdas.git production-repo
+        cd production-repo
+
+        # Configure Git user
+        git config --global user.name "github-actions"
+        git config --global user.email "github-actions@github.com"
+
+        cd ..
+
+        # Loop through changed projects and sync them to production
+        while read project; do
+          if [ "$(printenv ${project}_changed)" == "true" ]; then
+            echo "Syncing $project to production repo..."
+            
+            # Copy project files to production repository
+            cp -r $project production-repo/$project
+
+            cd production-repo
+            
+            # Commit and push changes to the production repository
+            git add $project
+            git commit -m "Auto-sync $project from main repo"
+            git push origin main  # Use the main branch of the production repository
+            
+            cd ..
+          fi
+        done < changed_projects.txt
